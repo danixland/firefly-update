@@ -160,9 +160,11 @@ if command -v sha256sum >/dev/null && curl -fLs -o "${zip}.sha256" "${base}.sha2
 	echo "checksum OK"
 fi
 
-# Exclude storage/ from extraction: we carry over the live storage below, and
-# the zip's storage skeleton would only get in the way.
-unzip -q "$zip" -x 'storage/*' -d "$UPDATED"
+# Extract the full archive, storage skeleton included. That skeleton provides
+# storage/framework/{cache,views,sessions}, which Laravel needs to boot; without
+# them artisan dies with a misleading "Target class [auth] does not exist". Live
+# user data (uploads, exports, DB) is overlaid on top below.
+unzip -q "$zip" -d "$UPDATED"
 rm -f "$zip"
 
 # Validate the extracted tree before proceeding. A partial extract must not be
@@ -172,9 +174,9 @@ for item in artisan bootstrap vendor public/v1/js/app.js; do
 	[ -e "${UPDATED}/${item}" ] || { echo "extracted install incomplete, missing: $item" >&2; exit 1; }
 done
 
-# Carry over config and user data. cp -a of dir/. copies contents incl. dotfiles,
-# and does not fail on an empty source directory. mkdir -p in case the zip
-# ships these dirs gitignored/absent.
+# Carry over config and user data, overlaying onto the extracted skeleton.
+# cp -a of dir/. copies contents incl. dotfiles and does not fail on an empty
+# source. mkdir -p is belt-and-suspenders should a future zip omit a dir.
 cp "${LIVE}/.env" "${UPDATED}/.env"
 mkdir -p "${UPDATED}/storage/upload" "${UPDATED}/storage/export" "${UPDATED}/storage/database"
 cp -a "${LIVE}/storage/upload/." "${UPDATED}/storage/upload/"

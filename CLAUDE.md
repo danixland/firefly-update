@@ -40,6 +40,13 @@ Debian. See README.md for usage; this file is the non-obvious context.
   space then `*`); `cut -d' ' -f1` gets the hash. The script verifies it when
   `sha256sum` is available, and validates the extracted tree before swapping.
 
+- **Extract the FULL zip, do NOT `unzip -x 'storage/*'`.** The zip's storage
+  skeleton provides `storage/framework/{cache,views,sessions}`, which Laravel
+  needs to boot. Excluding it and recreating only the data dirs makes artisan
+  die with the misleading `Target class [auth] does not exist` (the real boot
+  failure is masked by the exception reporter, which itself calls `auth()`).
+  Extract everything, then overlay live user data (uploads/exports/DB) on top.
+
 ## Conventions
 
 - Config via env vars (`WORKDIR`, `INSTANCE`, `BACKUPDIR`), matching the

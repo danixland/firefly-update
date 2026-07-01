@@ -1,0 +1,160 @@
+#!/bin/bash
+#
+# firefly-update - update a Firefly III instance on Debian.
+# Copyright (C) 2026 Danilo M. <danix@danix.xyz>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+
+WORKDIR=${WORKDIR:-/var/www}
+# Directory name of the live instance under $WORKDIR. Override with INSTANCE=...
+INSTANCE=${INSTANCE:-piggy}
+
+LIVE="${WORKDIR}/${INSTANCE}"
+OLD="${WORKDIR}/${INSTANCE}-old"
+UPDATED="${WORKDIR}/${INSTANCE}-updated"
+BACKUPDIR=${BACKUPDIR:-${WORKDIR}/firefly-backups}
+
+usage() {
+	cat <<EOF
+usage: $0 [-v|--version <tag>] [--restore] [-h|--help]
+
+Update the Firefly III instance \$INSTANCE (default piggy) in \$WORKDIR
+(default /var/www).
+
+  -v, --version <tag>   Install this release tag instead of autodiscovering
+                        the latest (e.g. -v 6.1.0).
+  --restore             Roll back: swap $OLD back to live and overlay the
+                        newest DB backup from $BACKUPDIR. Runs instead of
+                        an update.
+  -h, --help            Show this help and exit.
+EOF
+}
+
+restore() {
+	[ -d "$OLD" ] || { echo "no backup files at $OLD to restore from" >&2; exit 1; }
+	# Backup names are database-YYYYMMDD-HHMMSS.sqlite, so lexical sort == time
+	# order; pick the last. Glob avoids parsing ls output (breaks on aliases).
+	shopt -s nullglob
+	backups=("${BACKUPDIR}"/database-*.sqlite)
+	shopt -u nullglob
+	[ ${#backups[@]} -gt 0 ] || { echo "no DB backup found in $BACKUPDIR" >&2; exit 1; }
+	newdb=$(printf '%s\n' "${backups[@]}" | sort | tail -n1)
+
+	echo "restoring files from $OLD and database from $newdb"
+	cd "$WORKDIR" || { echo "cannot cd to $WORKDIR" >&2; exit 1; }
+	rm -rf "${LIVE}-broken"
+	mv "$LIVE" "${LIVE}-broken"
+	mv "$OLD" "$LIVE"
+	cp "$newdb" "${LIVE}/storage/database/database.sqlite"
+
+	chown -R www-data:www-data "$LIVE"
+	chmod -R 775 "${LIVE}/storage"
+	service apache2 restart
+	echo "restored. broken version saved at ${LIVE}-broken (remove once verified)"
+}
+
+# Optional -v/--version <tag> overrides autodiscovery of the latest release.
+latestversion=""
+dorestore=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-v|--version)
+			latestversion="${2:-}"
+			[ -n "$latestversion" ] || { echo "$1 requires a value" >&2; exit 1; }
+			shift 2
+			;;
+		--version=*)
+			latestversion="${1#*=}"
+			shift
+			;;
+		--restore)
+			dorestore=1
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			echo "unknown argument: $1" >&2
+			usage >&2
+			exit 1
+			;;
+	esac
+done
+
+if [ -n "$dorestore" ]; then
+	restore
+	exit 0
+fi
+
+# Modify next line to where your firefly-iii instance is installed to.
+cd "$WORKDIR" || { echo "cannot cd to $WORKDIR" >&2; exit 1; }
+
+# Timestamped DB backup before anything touches the live instance. Survives the
+# next run (unlike $OLD, which is removed below). Override dir with BACKUPDIR=...
+mkdir -p "$BACKUPDIR"
+backup="${BACKUPDIR}/database-$(date +%Y%m%d-%H%M%S).sqlite"
+cp "${LIVE}/storage/database/database.sqlite" "$backup"
+echo "backed up database to $backup"
+
+# Remove old version of firefly-iii from a previous run.
+rm -rf "$OLD"
+
+# Get latest version of firefly unless --version was given.
+if [ -z "$latestversion" ]; then
+	latestversion=$(curl -s https://api.github.com/repos/firefly-iii/firefly-iii/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+	if [ -z "$latestversion" ]; then
+		echo "could not determine latest firefly-iii version (curl failed or rate-limited)" >&2
+		exit 1
+	fi
+fi
+echo "installing firefly-iii $latestversion"
+
+# Install latest version. COMPOSER_ALLOW_SUPERUSER silences the root warning
+# (this script runs as root); --no-interaction skips all prompts.
+rm -rf "$UPDATED"
+COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction --no-dev --prefer-dist grumpydictator/firefly-iii "$UPDATED" "$latestversion"
+
+# Carry over config and user data. cp -a of dir/. copies contents incl. dotfiles,
+# and does not fail on an empty source directory.
+cp "${LIVE}/.env" "${UPDATED}/.env"
+cp -a "${LIVE}/storage/upload/." "${UPDATED}/storage/upload/"
+cp -a "${LIVE}/storage/export/." "${UPDATED}/storage/export/"
+# SQLite DB is a file; copy it so migrate runs on real data, not the fresh
+# empty database.sqlite the new install ships with.
+cp "${LIVE}/storage/database/database.sqlite" "${UPDATED}/storage/database/database.sqlite"
+
+cd "$UPDATED" || { echo "cannot cd to $UPDATED" >&2; exit 1; }
+rm -rf bootstrap/cache/*
+php artisan cache:clear
+php artisan migrate --seed --force
+php artisan firefly-iii:upgrade-database
+php artisan passport:install
+php artisan cache:clear
+
+# Swap next version in. set -e above aborts before this if any step failed,
+# so a broken build never replaces the live install.
+cd "$WORKDIR"
+mv "$LIVE" "$OLD"
+mv "$UPDATED" "$LIVE"
+
+cd "$LIVE" || { echo "cannot cd to $LIVE" >&2; exit 1; }
+php artisan cache:clear
+
+# Fix rights, restart apache2.
+chown -R www-data:www-data "$LIVE"
+chmod -R 775 "${LIVE}/storage"
+service apache2 restart

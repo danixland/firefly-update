@@ -141,11 +141,36 @@ echo "installing firefly-iii $tag"
 rm -rf "$UPDATED"
 mkdir -p "$UPDATED"
 zip="${WORKDIR}/firefly-${tag}.zip"
-url="https://github.com/firefly-iii/firefly-iii/releases/download/${tag}/FireflyIII-${tag}.zip"
-echo "downloading $url"
-curl -fL -o "$zip" "$url"
-unzip -q "$zip" -d "$UPDATED"
+base="https://github.com/firefly-iii/firefly-iii/releases/download/${tag}/FireflyIII-${tag}.zip"
+echo "downloading $base"
+curl -fL -o "$zip" "$base"
+
+# Verify the archive against the release SHA256 if available and sha256sum is
+# present. A truncated/corrupt download otherwise extracts garbage.
+if command -v sha256sum >/dev/null && curl -fLs -o "${zip}.sha256" "${base}.sha256"; then
+	# The published file is "<hash>  FireflyIII-<tag>.zip"; check against our path.
+	expected=$(cut -d' ' -f1 "${zip}.sha256")
+	actual=$(sha256sum "$zip" | cut -d' ' -f1)
+	rm -f "${zip}.sha256"
+	if [ "$expected" != "$actual" ]; then
+		echo "checksum mismatch: expected $expected, got $actual" >&2
+		rm -f "$zip"
+		exit 1
+	fi
+	echo "checksum OK"
+fi
+
+# Exclude storage/ from extraction: we carry over the live storage below, and
+# the zip's storage skeleton would only get in the way.
+unzip -q "$zip" -x 'storage/*' -d "$UPDATED"
 rm -f "$zip"
+
+# Validate the extracted tree before proceeding. A partial extract must not be
+# allowed to replace the live install. $OLD does not exist yet at this point,
+# so failing here leaves the live instance untouched (ERR trap + set -e).
+for item in artisan bootstrap vendor public/v1/js/app.js; do
+	[ -e "${UPDATED}/${item}" ] || { echo "extracted install incomplete, missing: $item" >&2; exit 1; }
+done
 
 # Carry over config and user data. cp -a of dir/. copies contents incl. dotfiles,
 # and does not fail on an empty source directory. mkdir -p in case the zip
@@ -187,10 +212,14 @@ else
 	echo "warning: sqlite3 not found, skipping oauth migration reconcile" >&2
 fi
 
-php artisan migrate --force
-php artisan firefly-iii:upgrade-database
-php artisan passport:install
+# Upgrade sequence per the official self-managed upgrade docs, with --force
+# (non-interactive) and the oauth reconcile above. laravel-passport-keys is the
+# Firefly-specific passport step, not the generic passport:install.
+php artisan migrate --force --seed
 php artisan cache:clear
+php artisan view:clear
+php artisan firefly-iii:upgrade-database
+php artisan firefly-iii:laravel-passport-keys
 
 # Swap next version in. set -e above aborts before this if any step failed,
 # so a broken build never replaces the live install.

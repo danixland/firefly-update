@@ -29,6 +29,17 @@ Debian. See README.md for usage; this file is the non-obvious context.
   on the v2 error and login pages. Graphs breaking = missing `public/v1/js`
   bundles (see the zip point above), a different cause.
 
+- **Upgrade artisan sequence follows the official self-managed docs**:
+  `migrate --seed`, `cache:clear`, `view:clear`, `firefly-iii:upgrade-database`,
+  `firefly-iii:laravel-passport-keys`. Use `firefly-iii:laravel-passport-keys`,
+  NOT `passport:install`. We add `--force` (non-interactive) and the oauth
+  reconcile before migrate. Docs also confirm composer create-project is no
+  longer recommended.
+
+- **Release `.sha256` format** is `<hash> *FireflyIII-<tag>.zip` (BSD-style,
+  space then `*`); `cut -d' ' -f1` gets the hash. The script verifies it when
+  `sha256sum` is available, and validates the extracted tree before swapping.
+
 ## Conventions
 
 - Config via env vars (`WORKDIR`, `INSTANCE`, `BACKUPDIR`), matching the

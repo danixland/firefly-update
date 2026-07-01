@@ -12,7 +12,14 @@ create-project`. The composer/Packagist dist ships source only and lacks the
 compiled frontend bundles, which leaves the UI broken (no graphs, 404s on
 `/v1/js/app.js`). The release zip is prebuilt.
 
-Requires `curl`, `unzip`, `php`, and `sqlite3` on the host.
+Requires `curl`, `unzip`, `php`, and `sqlite3` on the host. If `sha256sum` is
+present, the download is verified against the release checksum, and the
+extracted tree is validated (`artisan`, `bootstrap`, `vendor`, the compiled
+frontend bundle) before the live swap.
+
+The upgrade commands follow the official self-managed upgrade docs
+(`migrate --seed`, `cache:clear`, `view:clear`, `firefly-iii:upgrade-database`,
+`firefly-iii:laravel-passport-keys`), with `--force` for non-interactive use.
 
 ## Usage
 

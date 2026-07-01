@@ -16,6 +16,9 @@
 # along with this program; if not, see <https://www.gnu.org/licenses/>.
 
 set -euo pipefail
+# Loud failure: without this the script died silently mid-update and left a
+# half-built dir that looked like success. Now it names the failing line.
+trap 'echo "FAILED at line $LINENO (last command exited $?)" >&2' ERR
 
 WORKDIR=${WORKDIR:-/var/www}
 # Directory name of the live instance under $WORKDIR. Override with INSTANCE=...
@@ -100,6 +103,10 @@ if [ -n "$dorestore" ]; then
 	exit 0
 fi
 
+for dep in curl unzip php; do
+	command -v "$dep" >/dev/null || { echo "required command not found: $dep" >&2; exit 1; }
+done
+
 # Modify next line to where your firefly-iii instance is installed to.
 cd "$WORKDIR" || { echo "cannot cd to $WORKDIR" >&2; exit 1; }
 
@@ -121,16 +128,30 @@ if [ -z "$latestversion" ]; then
 		exit 1
 	fi
 fi
-echo "installing firefly-iii $latestversion"
+# Release tags carry a leading "v" (e.g. v6.6.5). Normalize so both -v 6.6.5
+# and -v v6.6.5 work, and so the autodiscovered tag matches the asset name.
+case "$latestversion" in v*) tag="$latestversion" ;; *) tag="v$latestversion" ;; esac
+echo "installing firefly-iii $tag"
 
-# Install latest version. COMPOSER_ALLOW_SUPERUSER silences the root warning
-# (this script runs as root); --no-interaction skips all prompts.
+# Install from the official release zip, NOT composer create-project. The
+# composer/Packagist dist ships source only: it lacks the webpack-compiled
+# frontend bundles (public/v1/js/app.js etc.), which breaks the UI (no graphs,
+# broken pages). The release zip is prebuilt and is the artifact Firefly's
+# install docs point at. Asset name is FireflyIII-<tag>.zip, tag incl. the "v".
 rm -rf "$UPDATED"
-COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction --no-dev --prefer-dist grumpydictator/firefly-iii "$UPDATED" "$latestversion"
+mkdir -p "$UPDATED"
+zip="${WORKDIR}/firefly-${tag}.zip"
+url="https://github.com/firefly-iii/firefly-iii/releases/download/${tag}/FireflyIII-${tag}.zip"
+echo "downloading $url"
+curl -fL -o "$zip" "$url"
+unzip -q "$zip" -d "$UPDATED"
+rm -f "$zip"
 
 # Carry over config and user data. cp -a of dir/. copies contents incl. dotfiles,
-# and does not fail on an empty source directory.
+# and does not fail on an empty source directory. mkdir -p in case the zip
+# ships these dirs gitignored/absent.
 cp "${LIVE}/.env" "${UPDATED}/.env"
+mkdir -p "${UPDATED}/storage/upload" "${UPDATED}/storage/export" "${UPDATED}/storage/database"
 cp -a "${LIVE}/storage/upload/." "${UPDATED}/storage/upload/"
 cp -a "${LIVE}/storage/export/." "${UPDATED}/storage/export/"
 # SQLite DB is a file; copy it so migrate runs on real data, not the fresh
@@ -140,7 +161,33 @@ cp "${LIVE}/storage/database/database.sqlite" "${UPDATED}/storage/database/datab
 cd "$UPDATED" || { echo "cannot cd to $UPDATED" >&2; exit 1; }
 rm -rf bootstrap/cache/*
 php artisan cache:clear
-php artisan migrate --seed --force
+
+# Reconcile Passport OAuth migrations. Passport renames its migration files
+# between versions (e.g. 2018_..._create_oauth_auth_codes -> 2016_...), so a
+# carried-over DB has the TABLES but the new filenames look "pending", and
+# migrate then tries CREATE TABLE on an existing table and aborts. For every
+# oauth migration whose table already exists but whose filename isn't recorded,
+# insert a migrations row so migrate skips it. Missing tables are left for
+# migrate to create normally. Requires sqlite3.
+db="${UPDATED}/storage/database/database.sqlite"
+if command -v sqlite3 >/dev/null; then
+	batch=$(( $(sqlite3 "$db" "SELECT COALESCE(MAX(batch),0) FROM migrations;") + 1 ))
+	for f in database/migrations/*oauth*; do
+		[ -e "$f" ] || continue
+		name=$(basename "$f" .php)
+		tbl=$(grep -oP "Schema::create\('\K[^']+" "$f" | head -1)
+		[ -n "$tbl" ] || continue
+		[ -n "$(sqlite3 "$db" "SELECT 1 FROM migrations WHERE migration='$name';")" ] && continue
+		if [ -n "$(sqlite3 "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$tbl';")" ]; then
+			sqlite3 "$db" "INSERT INTO migrations (migration,batch) VALUES ('$name',$batch);"
+			echo "reconciled existing oauth table: $tbl ($name)"
+		fi
+	done
+else
+	echo "warning: sqlite3 not found, skipping oauth migration reconcile" >&2
+fi
+
+php artisan migrate --force
 php artisan firefly-iii:upgrade-database
 php artisan passport:install
 php artisan cache:clear

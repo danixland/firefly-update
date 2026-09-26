@@ -135,7 +135,7 @@ echo "installing firefly-iii $tag"
 
 # Install from the official release zip, NOT composer create-project. The
 # composer/Packagist dist ships source only: it lacks the webpack-compiled
-# frontend bundles (public/v1/js/app.js etc.), which breaks the UI (no graphs,
+# frontend bundles (public/build, and public/v1/js before 6.7), which breaks the UI (no graphs,
 # broken pages). The release zip is prebuilt and is the artifact Firefly's
 # install docs point at. Asset name is FireflyIII-<tag>.zip, tag incl. the "v".
 rm -rf "$UPDATED"
@@ -170,7 +170,9 @@ rm -f "$zip"
 # Validate the extracted tree before proceeding. A partial extract must not be
 # allowed to replace the live install. $OLD does not exist yet at this point,
 # so failing here leaves the live instance untouched (ERR trap + set -e).
-for item in artisan bootstrap vendor public/v1/js/app.js; do
+# public/build/manifest.json marks prebuilt frontend in every release (6.7
+# dropped the legacy public/v1/js/app.js bundle); composer dist lacks it.
+for item in artisan bootstrap vendor public/build/manifest.json; do
 	[ -e "${UPDATED}/${item}" ] || { echo "extracted install incomplete, missing: $item" >&2; exit 1; }
 done
 

@@ -12,6 +12,11 @@ Debian. See README.md for usage; this file is the non-obvious context.
   pages throw `Vite manifest not found (public/build/manifest.json)` as a
   secondary symptom. The zip is prebuilt and is the supported artifact.
 
+- **v6.7 dropped the legacy `public/v1/js/app.js` bundle** (new layout; only
+  `public/v1/js/ff/*` and `.htaccess` remain). The extract check keys on
+  `public/build/manifest.json` instead, present in 6.6.x and 6.7.x zips and
+  absent from the composer dist. Don't go back to checking `app.js`.
+
 - **Release tag carries a leading `v`** (`v6.6.5`). Asset name is
   `FireflyIII-<tag>.zip` with the `v` included. `--version` is normalized so
   both `6.6.5` and `v6.6.5` work; don't reintroduce a double-`v` bug.
